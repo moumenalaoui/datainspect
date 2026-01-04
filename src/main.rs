@@ -38,6 +38,7 @@ fn main() {
     // flag
     let show_types = args.iter().any(|a| a == "--types");
     let show_summary = args.iter().any(|a| a == "--summary");
+    let show_diagnose = args.iter().any(|a| a == "--diagnose");
 
     // positional arguments
     let positional: Vec<&String> = args
@@ -59,7 +60,7 @@ fn main() {
         .unwrap_or("");
 
     match extension {
-        "csv" => inspect_csv(filename, show_types, show_summary),
+        "csv" => inspect_csv(filename, show_types, show_summary, show_diagnose),
         "json" => inspect_json(filename, show_types),
         _ => {
             eprintln!("Unsupported file type: {}", extension);
@@ -90,6 +91,12 @@ struct ColumnStats {
 
     // categorical stats
     uniques: HashSet<String>,
+
+    //diagnostics helpers
+    numeric_parse_failures: usize,
+
+    //outliers 
+    outlier_count: usize,
 }
 
 // Welford's ALGORITHM -> streaming mean + variance
@@ -106,6 +113,8 @@ impl ColumnStats {
             mean: 0.0,
             m2: 0.0,
             uniques: HashSet::new(),
+            numeric_parse_failures: 0,
+            outlier_count: 0,
         }
     }
 
@@ -120,13 +129,28 @@ impl ColumnStats {
         match self.kind {
             ColumnType::Numeric => {
                 if let Ok(x) = value.parse::<f64>() {
-                    let count = self.total - self.missing;
+                    let previous_count = self.total - self.missing - 1;
+                    
+                    if previous_count >= 2 {
+                        let prev_stddev = (self.m2 / (previous_count as f64 - 1.0)).sqrt();
+                        if prev_stddev > 0.0 {
+                            let z = (x - self.mean).abs() / prev_stddev;
+                            if z >= 5.0 {
+                                self.outlier_count += 1;
+                            }
+                        }
+                    }
+                    
+                    // update stats with current value
+                    let count = previous_count + 1;
                     let delta = x - self.mean;
                     self.mean += delta / count as f64;
                     self.m2 += delta * (x - self.mean);
 
                     self.min = Some(self.min.map_or(x, |m| m.min(x)));
                     self.max = Some(self.max.map_or(x, |m| m.max(x)));
+                } else {
+                    self.numeric_parse_failures += 1;
                 }
             }
             ColumnType::Categorical => {
@@ -145,7 +169,7 @@ impl ColumnStats {
     }
 }
 
-fn inspect_csv(filename: &str, show_types: bool, show_summary: bool) {
+fn inspect_csv(filename: &str, show_types: bool, show_summary: bool, show_diagnose: bool) {
     let mut reader = Reader::from_path(filename)
         .expect("Failed to open CSV file");
 
@@ -244,6 +268,79 @@ fn inspect_csv(filename: &str, show_types: bool, show_summary: bool) {
                     );
                 }
             }
+        }
+    }
+
+    if show_diagnose {
+        println!();
+        println!("Data Quality Report");
+        println!("--------------------");
+        println!();
+
+        for stats_opt in column_stats.iter().flatten() {
+            println!("{} ({:?})", stats_opt.name, stats_opt.kind);
+            diagnose_column(stats_opt, row_count);
+            println!();
+        }
+    }
+}
+
+fn diagnose_column(stats: &ColumnStats, total_rows: usize) {
+    let mut warnings = Vec::new();
+
+    let missing_ratio = stats.missing as f64 / total_rows as f64;
+
+    // missing severity
+    if missing_ratio > 0.05 {
+        warnings.push(format!(
+            "! missing values: {}%",
+            (missing_ratio * 100.0).round() as usize
+        ));
+    }
+
+    match stats.kind {
+        ColumnType::Categorical => {
+            let non_missing = total_rows - stats.missing;
+            if non_missing > 0 {
+                let unique_ratio = stats.uniques.len() as f64 / non_missing as f64;
+                if unique_ratio > 0.95 {
+                    warnings.push(format!(
+                        "! high cardinality: {:.1}% unique (likely identifier)",
+                        unique_ratio * 100.0
+                    ));
+                }
+            }
+        }
+
+        ColumnType::Numeric => {
+            // near-constant numeric
+            if let (Some(min), Some(max)) = (stats.min, stats.max) {
+                if (max - min).abs() < 1e-12 {
+                    warnings.push("! near-constant numeric column".to_string());
+                }
+            }
+
+            // mixed-type numeric
+            if stats.numeric_parse_failures > 0 {
+                warnings.push("! mixed numeric and non-numeric values".to_string());
+            }
+            
+            // outliers 
+            if stats.outlier_count > 0 {
+                warnings.push(format!(
+                        "! extreme outliers detected: {} values >= 5σ",
+                        stats.outlier_count
+                ));
+            }
+        }
+    }
+
+    // out
+    if warnings.is_empty() {
+        println!("  ok");
+    } else {
+        for w in warnings {
+            println!("  {}", w);
         }
     }
 }
