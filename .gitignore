@@ -8,3 +8,4 @@ Cargo.lock
 # Local test data 
 data.csv 
 data.json
+test.csv
