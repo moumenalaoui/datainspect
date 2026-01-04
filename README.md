@@ -66,4 +66,15 @@ department (Categorical)
 - Outlier detection avoids outlier masking by using pre-contamination statistics
 - The tool flags risks but does not prescribe fixes
 
+#### Installation 
+Clone the repository and install the binary locally using Cargo:
 
+```bash
+cargo install --path .
+```
+Make sure Cargo’s bin directory is on your PATH:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+Once installed, the datainspect command will be available system-wide.
