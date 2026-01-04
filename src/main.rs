@@ -3,9 +3,37 @@ use std::path::Path;
 use std::collections::HashSet;
 use csv::Reader;
 
+fn print_help() {
+    println!(
+        "datainspect - CLI Data Inspection tool
+
+USAGE: 
+    datainspect <file> [options]
+
+OPTIONS:
+  --summary        Show per-column statistical summary
+  --types          Show inferred column types
+  --help           Show this help message
+
+SUPPORTED FILES:
+  .csv
+  .json
+
+EXAMPLES:
+  datainspect data.csv --summary
+  datainspect data.csv --types
+  datainspect data.json --types"
+    );
+}
+
 fn main() {
     // skip program name
     let args: Vec<String> = env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--help") {
+        print_help();
+        return;
+    }
 
     // flag
     let show_types = args.iter().any(|a| a == "--types");
