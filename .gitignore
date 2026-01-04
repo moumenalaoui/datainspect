@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+Cargo.lock
+
+# OS noise 
+.DS_Store
+
+# Local test data 
+data.csv 
+data.json
