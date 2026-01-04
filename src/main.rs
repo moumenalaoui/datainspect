@@ -1,6 +1,6 @@
 use std::env;
 use std::path::Path;
-
+use std::collections::HashSet;
 use csv::Reader;
 
 fn main() {
@@ -40,31 +40,80 @@ fn main() {
     }
 }
 
-// show summary stats
-
-#[derive(Default)]
-struct NumericStats {
-    count: usize, 
-    sum: f64,
-    min: f64,
-    max: f64,
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ColumnType {
+    Numeric,
+    Categorical,
 }
 
-impl NumericStats {
-    fn update(&mut self, value: f64) {
-        if self.count == 0 {
-            self.min = value;
-            self.max = value;
-        } else {
-            self.min = self.min.min(value);
-            self.max = self.max.max(value);
+#[derive(Debug)]
+struct ColumnStats {
+    name: String,
+    kind: ColumnType,
+
+    total: usize,
+    missing: usize,
+
+    // num stats 
+    min: Option<f64>,
+    max: Option<f64>, 
+    mean: f64,
+    m2: f64, 
+
+    // categorical stats
+    uniques: HashSet<String>,
+}
+
+// Welford's ALGORITHM -> streaming mean + variance
+
+impl ColumnStats {
+    fn new(name: &str, kind: ColumnType) -> Self {
+        Self {
+            name: name.to_string(),
+            kind,
+            total: 0,
+            missing: 0,
+            min: None,
+            max: None,
+            mean: 0.0,
+            m2: 0.0,
+            uniques: HashSet::new(),
         }
-        self.sum += value;
-        self.count += 1;
     }
 
-    fn mean(&self) -> f64 {
-        self.sum / self.count as f64
+    fn update(&mut self, value: &str) {
+        self.total += 1;
+
+        if value.is_empty() {
+            self.missing += 1;
+            return;
+        }
+
+        match self.kind {
+            ColumnType::Numeric => {
+                if let Ok(x) = value.parse::<f64>() {
+                    let count = self.total - self.missing;
+                    let delta = x - self.mean;
+                    self.mean += delta / count as f64;
+                    self.m2 += delta * (x - self.mean);
+
+                    self.min = Some(self.min.map_or(x, |m| m.min(x)));
+                    self.max = Some(self.max.map_or(x, |m| m.max(x)));
+                }
+            }
+            ColumnType::Categorical => {
+                self.uniques.insert(value.to_string());
+            }
+        }
+    }
+
+    fn stddev(&self) -> Option<f64> {
+        let count = self.total - self.missing;
+        if count > 1 {
+            Some((self.m2 / (count as f64 - 1.0)).sqrt())
+        } else {
+            None
+        }
     }
 }
 
@@ -81,31 +130,43 @@ fn inspect_csv(filename: &str, show_types: bool, show_summary: bool) {
 
     let mut row_count = 0;
     let mut inferred: Vec<Option<&'static str>> = vec![None; col_count];
-
-    let mut numeric_stats: Vec<NumericStats> =
-        (0..col_count).map(|_| NumericStats::default()).collect();
-
-    let mut non_null_counts: Vec<usize> = vec![0; col_count];
+    let mut column_stats: Vec<Option<ColumnStats>> = (0..col_count).map(|_| None).collect();
 
     for result in reader.records() {
         let record = result.expect("Failed to read record");
         row_count += 1;
 
         for (i, value) in record.iter().enumerate() {
-            if value.is_empty() {
-                continue;
-            }
-
-            non_null_counts[i] += 1;
-
             if inferred[i].is_none() {
-                inferred[i] = Some(infer_type(value));
+                let kind = if value.is_empty() {
+                    // temporarily unknown, treat as categorical for now
+                    ColumnType::Categorical
+                } else {
+                    match infer_type(value) {
+                        "integer" | "float" => ColumnType::Numeric,
+                        _ => ColumnType::Categorical,
+                    }
+                };
+
+                inferred[i] = Some(match kind {
+                    ColumnType::Numeric => "numeric",
+                    ColumnType::Categorical => "categorical",
+                });
+
+                column_stats[i] = Some(ColumnStats::new(&headers[i], kind));
             }
 
-            if show_summary {
-                if let Ok(v) = value.parse::<f64>() {
-                    numeric_stats[i].update(v);
+            if let Some(stats) = &mut column_stats[i] {
+                if stats.kind == ColumnType::Categorical && !value.is_empty() {
+                    if matches!(infer_type(value), "integer" | "float") {
+                        // Upgrade categorical → numeric
+                        stats.kind = ColumnType::Numeric;
+                        stats.uniques.clear(); // no longer needed
+                        inferred[i] = Some("numeric");
+                    }
                 }
+
+                stats.update(value);
             }
         }
     }
@@ -126,35 +187,38 @@ fn inspect_csv(filename: &str, show_types: bool, show_summary: bool) {
 
     if show_summary {
         println!("Summary:");
-        for i in 0..col_count {
-            let name = &headers[i];
-            let dtype = inferred[i].unwrap_or("unknown");
 
-            if dtype == "integer" || dtype == "float" {
-                let stats = &numeric_stats[i];
-                if stats.count > 0 {
+        for stats_opt in column_stats.iter().flatten() {
+            match stats_opt.kind {
+                ColumnType::Numeric => {
+                    let count = stats_opt.total - stats_opt.missing;
+
+                    if count > 0 {
+                        println!(
+                            "  - {} (numeric): count={} missing={} min={} max={} mean={} stddev={}",
+                            stats_opt.name,
+                            count,
+                            stats_opt.missing,
+                            stats_opt.min.unwrap(),
+                            stats_opt.max.unwrap(),
+                            stats_opt.mean,
+                            stats_opt.stddev().unwrap_or(0.0)
+                        );
+                    }
+                }
+                ColumnType::Categorical => {
                     println!(
-                        "  - {} ({}): count={} min={} max={} mean={}",
-                        name,
-                        dtype,
-                        stats.count,
-                        stats.min,
-                        stats.max,
-                        stats.mean()
+                        "  - {} (categorical): count={} missing={} unique={}",
+                        stats_opt.name,
+                        stats_opt.total - stats_opt.missing,
+                        stats_opt.missing,
+                        stats_opt.uniques.len()
                     );
                 }
-            } else {
-                println!(
-                    "  - {} ({}): count={}",
-                    name,
-                    dtype,
-                    non_null_counts[i]
-                );
             }
         }
     }
 }
-
 
 fn inspect_json(filename: &str, show_types: bool) {
     let contents = std::fs::read_to_string(filename)
