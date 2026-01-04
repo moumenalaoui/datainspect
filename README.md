@@ -59,6 +59,7 @@ user_id (Categorical)
 
 department (Categorical)
   ok
+```
 
 #### Design Notes 
 - All statistics are computed in a single streaming pass
